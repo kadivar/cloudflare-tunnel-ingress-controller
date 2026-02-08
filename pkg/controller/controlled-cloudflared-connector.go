@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 
 	cloudflarecontroller "github.com/STRRL/cloudflare-tunnel-ingress-controller/pkg/cloudflare-controller"
 	"github.com/pkg/errors"
@@ -43,37 +44,17 @@ func CreateOrUpdateControlledCloudflared(
 			return errors.Wrap(err, "get desired replicas")
 		}
 
-		needsUpdate := false
-		if *existingDeployment.Spec.Replicas != desiredReplicas {
-			needsUpdate = true
-		}
-
 		// Get token once for all checks
 		token, err := tunnelClient.FetchTunnelToken(ctx)
 		if err != nil {
 			return errors.Wrap(err, "fetch tunnel token")
 		}
 
-		if len(existingDeployment.Spec.Template.Spec.Containers) > 0 {
-			container := &existingDeployment.Spec.Template.Spec.Containers[0]
-			if container.Image != os.Getenv("CLOUDFLARED_IMAGE") {
-				needsUpdate = true
-			}
-			if string(container.ImagePullPolicy) != os.Getenv("CLOUDFLARED_IMAGE_PULL_POLICY") {
-				needsUpdate = true
-			}
-			
-			// Check if command arguments have changed
-			desiredCommand := buildCloudflaredCommand(protocol, token, extraArgs)
-			if !slicesEqual(container.Command, desiredCommand) {
-				needsUpdate = true
-			}
-		}
+		desiredDeployment := cloudflaredConnectDeploymentTemplating(protocol, token, namespace, desiredReplicas, extraArgs)
+		needsUpdate := connectorSpecNeedsUpdate(existingDeployment, desiredDeployment)
 
 		if needsUpdate {
-
-			updatedDeployment := cloudflaredConnectDeploymentTemplating(protocol, token, namespace, desiredReplicas, extraArgs)
-			existingDeployment.Spec = updatedDeployment.Spec
+			existingDeployment.Spec = desiredDeployment.Spec
 			err = kubeClient.Update(ctx, existingDeployment)
 			if err != nil {
 				return errors.Wrap(err, "update controlled-cloudflared-connector deployment")
@@ -142,20 +123,172 @@ func cloudflaredConnectDeploymentTemplating(protocol string, token string, names
 						"strrl.dev/cloudflare-tunnel-ingress-controller": "controlled-cloudflared-connector",
 					},
 				},
-				Spec: v1.PodSpec{
-					Containers: []v1.Container{
-						{
-							Name:            appName,
-							Image:           image,
-							ImagePullPolicy: v1.PullPolicy(pullPolicy),
-							Command: buildCloudflaredCommand(protocol, token, extraArgs),
-						},
-					},
-					RestartPolicy: v1.RestartPolicyAlways,
-				},
+				Spec: buildConnectorPodSpec(image, pullPolicy, protocol, token, extraArgs),
 			},
 		},
 	}
+}
+
+// getConnectorPodSpecFromEnv reads optional connector pod spec overrides from env.
+// Used for hostNetwork + dnsConfig when cluster DNS and external DNS must both be available (e.g. IPv6-only nodes).
+func getConnectorPodSpecFromEnv() (hostNetwork bool, dnsPolicy v1.DNSPolicy, dnsConfig *v1.PodDNSConfig) {
+	if os.Getenv("CLOUDFLARED_HOST_NETWORK") == "true" {
+		hostNetwork = true
+	}
+	switch os.Getenv("CLOUDFLARED_DNS_POLICY") {
+	case "None":
+		dnsPolicy = v1.DNSNone
+		nameservers := splitNonEmpty(os.Getenv("CLOUDFLARED_DNS_CONFIG_NAMESERVERS"), ",")
+		searches := splitNonEmpty(os.Getenv("CLOUDFLARED_DNS_CONFIG_SEARCHES"), ",")
+		if len(nameservers) > 0 {
+			dnsConfig = &v1.PodDNSConfig{
+				Nameservers: nameservers,
+				Searches:    searches,
+			}
+		}
+	case "Default":
+		dnsPolicy = v1.DNSDefault
+	case "ClusterFirstWithHostNet":
+		dnsPolicy = v1.DNSClusterFirstWithHostNet
+	default:
+		// leave dnsPolicy zero value (ClusterFirst)
+	}
+	return
+}
+
+func splitNonEmpty(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func buildConnectorPodSpec(image, pullPolicy, protocol, token string, extraArgs []string) v1.PodSpec {
+	spec := v1.PodSpec{
+		Containers: []v1.Container{
+			{
+				Name:            "controlled-cloudflared-connector",
+				Image:           image,
+				ImagePullPolicy: v1.PullPolicy(pullPolicy),
+				Command:         buildCloudflaredCommand(protocol, token, extraArgs),
+			},
+		},
+		RestartPolicy: v1.RestartPolicyAlways,
+	}
+	hostNetwork, dnsPolicy, dnsConfig := getConnectorPodSpecFromEnv()
+	spec.HostNetwork = hostNetwork
+	if dnsPolicy != "" {
+		spec.DNSPolicy = dnsPolicy
+	}
+	if dnsConfig != nil {
+		spec.DNSConfig = dnsConfig
+	}
+	nodeSelector, affinity := getConnectorSchedulingFromEnv()
+	if len(nodeSelector) > 0 {
+		spec.NodeSelector = nodeSelector
+	}
+	if affinity != nil {
+		spec.Affinity = affinity
+	}
+	return spec
+}
+
+// getConnectorSchedulingFromEnv reads optional scheduling overrides from env so the controller's desired spec
+// includes them and they are not overwritten by reconciliation (e.g. run on workers only, one per node).
+func getConnectorSchedulingFromEnv() (nodeSelector map[string]string, affinity *v1.Affinity) {
+	if os.Getenv("CLOUDFLARED_NODE_SELECTOR_WORKER") == "true" {
+		nodeSelector = map[string]string{"node-role.kubernetes.io/worker": ""}
+	}
+	if os.Getenv("CLOUDFLARED_SPREAD_ONE_PER_NODE") == "true" {
+		affinity = &v1.Affinity{
+			PodAntiAffinity: &v1.PodAntiAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+					{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"app": "controlled-cloudflared-connector"},
+						},
+						TopologyKey: "kubernetes.io/hostname",
+					},
+				},
+			},
+		}
+	}
+	return
+}
+
+// connectorSpecNeedsUpdate returns true if existing deployment spec differs from desired (replicas, image, command, scheduling, or pod spec overrides).
+func connectorSpecNeedsUpdate(existing, desired *appsv1.Deployment) bool {
+	if *existing.Spec.Replicas != *desired.Spec.Replicas {
+		return true
+	}
+	exPod := &existing.Spec.Template.Spec
+	desPod := &desired.Spec.Template.Spec
+	if exPod.HostNetwork != desPod.HostNetwork || exPod.DNSPolicy != desPod.DNSPolicy {
+		return true
+	}
+	if !dnsConfigEqual(exPod.DNSConfig, desPod.DNSConfig) {
+		return true
+	}
+	if !nodeSelectorEqual(exPod.NodeSelector, desPod.NodeSelector) {
+		return true
+	}
+	if !affinityEqual(exPod.Affinity, desPod.Affinity) {
+		return true
+	}
+	if len(existing.Spec.Template.Spec.Containers) == 0 || len(desired.Spec.Template.Spec.Containers) == 0 {
+		return true
+	}
+	exC := &existing.Spec.Template.Spec.Containers[0]
+	desC := &desired.Spec.Template.Spec.Containers[0]
+	if exC.Image != desC.Image || exC.ImagePullPolicy != desC.ImagePullPolicy {
+		return true
+	}
+	// Compare command (includes token and extraArgs)
+	if !slicesEqual(exC.Command, desC.Command) {
+		return true
+	}
+	return false
+}
+
+func nodeSelectorEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func affinityEqual(a, b *v1.Affinity) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	// Compare only PodAntiAffinity required terms we use (one-per-node spread)
+	exReq := a.PodAntiAffinity != nil && len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
+	desReq := b.PodAntiAffinity != nil && len(b.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
+	return exReq == desReq
+}
+
+func dnsConfigEqual(a, b *v1.PodDNSConfig) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return slicesEqual(a.Nameservers, b.Nameservers) && slicesEqual(a.Searches, b.Searches)
 }
 
 func getDesiredReplicas() (int32, error) {

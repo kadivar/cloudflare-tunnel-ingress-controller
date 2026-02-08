@@ -1,11 +1,12 @@
 # Build the manager binary
 FROM golang:1.24 AS builder
+ARG GOPROXY=https://proxy.golang.org,direct
 
 WORKDIR /workspace
 
 # pre-copy/cache go.mod for pre-downloading dependencies and only redownloading them in subsequent builds if they change
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+RUN GOPROXY=${GOPROXY} go mod download && go mod verify
 
 # Build
 COPY  . .

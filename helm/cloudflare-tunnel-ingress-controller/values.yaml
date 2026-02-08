@@ -83,6 +83,15 @@ cloudflared:
   # Extra arguments to pass to cloudflared command
   # Example: ["--post-quantum", "--edge-ip-version", "4"]
   extraArgs: []
+  # Optional connector pod spec (hostNetwork + dnsConfig for dual DNS: cluster + external, e.g. IPv6-only nodes)
+  connectorPodSpec:
+    hostNetwork: false
+    dnsPolicy: "" # None, Default, or ClusterFirstWithHostNet. Use None with dnsConfig for cluster + external DNS.
+    dnsConfig:
+      nameservers: [] # e.g. [cluster-dns-ip, 2606:4700:4700::1111, 2606:4700:4700::1001]
+      searches: []   # e.g. [svc.cluster.local, cluster.local]
+    nodeSelectorWorker: false # if true, connector runs only on nodes with node-role.kubernetes.io/worker
+    spreadOnePerNode: false   # if true, pod anti-affinity spreads one connector per node
 
 cloudflaredServiceMonitor:
   create: false

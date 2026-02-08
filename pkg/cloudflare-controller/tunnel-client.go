@@ -80,15 +80,29 @@ func (t *TunnelClient) updateTunnelIngressRules(ctx context.Context, exposures [
 		Service: "http_status:404",
 	})
 
+	// Set global originRequest.noTLSVerify when any HTTPS backend has proxy-ssl-verify off.
+	// The Cloudflare API may not forward per-rule originRequest to the connector; the global
+	// config is what the connector receives and applies to all rules.
+	var globalOriginRequest *cloudflare.OriginRequestConfig
+	for _, item := range effectiveExposures {
+		if strings.HasPrefix(strings.ToLower(item.ServiceTarget), "https://") && (item.ProxySSLVerifyEnabled == nil || !*item.ProxySSLVerifyEnabled) {
+			globalOriginRequest = &cloudflare.OriginRequestConfig{NoTLSVerify: boolPointer(true)}
+			break
+		}
+	}
+
+	config := cloudflare.TunnelConfiguration{Ingress: ingressRules}
+	if globalOriginRequest != nil {
+		config.OriginRequest = *globalOriginRequest
+	}
+
 	t.logger.V(3).Info("update cloudflare tunnel config", "ingress-rules", ingressRules)
 
 	_, err := t.cfClient.UpdateTunnelConfiguration(ctx,
 		cloudflare.ResourceIdentifier(t.accountId),
 		cloudflare.TunnelConfigurationParams{
 			TunnelID: t.tunnelId,
-			Config: cloudflare.TunnelConfiguration{
-				Ingress: ingressRules,
-			},
+			Config:  config,
 		},
 	)
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,7 +37,7 @@ func FromIngressToExposure(ctx context.Context, logger logr.Logger, kubeClient c
 		scheme := "http"
 
 		if backendProtocol, ok := getAnnotation(ingress.Annotations, AnnotationBackendProtocol); ok {
-			scheme = backendProtocol
+			scheme = strings.ToLower(backendProtocol)
 		}
 
 		var httpHostHeader *string
@@ -108,9 +109,15 @@ func FromIngressToExposure(ctx context.Context, logger logr.Logger, kubeClient c
 				return nil, errors.Errorf("path type in ingress %s/%s is %s, which is not supported", ingress.GetNamespace(), ingress.GetName(), *path.PathType)
 			}
 
+			// Default to HTTPS when backend port is 443 (e.g. Kubernetes Dashboard) so tunnel uses TLS to origin
+			effectiveScheme := scheme
+			if port == 443 && scheme == "http" {
+				effectiveScheme = "https"
+			}
+
 			result = append(result, exposure.Exposure{
 				Hostname:              hostname,
-				ServiceTarget:         fmt.Sprintf("%s://%s:%d", scheme, host, port),
+				ServiceTarget:         fmt.Sprintf("%s://%s:%d", effectiveScheme, host, port),
 				PathPrefix:            path.Path,
 				IsDeleted:             isDeleted,
 				ProxySSLVerifyEnabled: proxySSLVerifyEnabled,

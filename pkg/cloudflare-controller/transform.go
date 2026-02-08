@@ -27,7 +27,7 @@ func fromExposureToCloudflareIngress(ctx context.Context, exposure exposure.Expo
 		result.OriginRequest.HTTPHostHeader = exposure.HTTPHostHeader
 	}
 
-	if strings.HasPrefix(exposure.ServiceTarget, "https://") {
+	if strings.HasPrefix(strings.ToLower(exposure.ServiceTarget), "https://") {
 		if result.OriginRequest == nil {
 			result.OriginRequest = &cloudflare.OriginRequestConfig{}
 		}

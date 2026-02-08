@@ -84,6 +84,18 @@ spec:
               value: {{ .Values.cloudflared.image.pullPolicy | quote }}
             - name: CLOUDFLARED_REPLICA_COUNT
               value: {{ .Values.cloudflared.replicaCount | quote }}
+            - name: CLOUDFLARED_HOST_NETWORK
+              value: {{ .Values.cloudflared.connectorPodSpec.hostNetwork | default false | quote }}
+            - name: CLOUDFLARED_DNS_POLICY
+              value: {{ .Values.cloudflared.connectorPodSpec.dnsPolicy | default "" | quote }}
+            - name: CLOUDFLARED_DNS_CONFIG_NAMESERVERS
+              value: {{ join "," (.Values.cloudflared.connectorPodSpec.dnsConfig.nameservers | default list) | quote }}
+            - name: CLOUDFLARED_DNS_CONFIG_SEARCHES
+              value: {{ join "," (.Values.cloudflared.connectorPodSpec.dnsConfig.searches | default list) | quote }}
+            - name: CLOUDFLARED_NODE_SELECTOR_WORKER
+              value: {{ .Values.cloudflared.connectorPodSpec.nodeSelectorWorker | default false | quote }}
+            - name: CLOUDFLARED_SPREAD_ONE_PER_NODE
+              value: {{ .Values.cloudflared.connectorPodSpec.spreadOnePerNode | default false | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
