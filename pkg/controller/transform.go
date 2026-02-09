@@ -141,8 +141,22 @@ func getHostFromService(service *v1.Service) (string, error) {
 		}
 	}
 
-	// Use FQDN service name instead of cluster IP for better stability
-	// Format: <service-name>.<namespace>.svc.cluster.local
+	// Use Cluster IP directly instead of DNS names.
+	// Cloudflared's internal DNS resolver can bypass system resolv.conf (especially with
+	// hostNetwork or QUIC protocol), causing .svc.cluster.local lookups to fail when querying
+	// Cloudflare public DNS (which doesn't know internal cluster names).
+	// Using IP addresses directly eliminates all DNS resolution issues.
+	// For IPv6 addresses, wrap in brackets for URL compatibility.
+	clusterIP := service.Spec.ClusterIP
+	if clusterIP != "" && clusterIP != "None" {
+		// Check if it's an IPv6 address (contains colons)
+		if strings.Contains(clusterIP, ":") {
+			return fmt.Sprintf("[%s]", clusterIP), nil
+		}
+		return clusterIP, nil
+	}
+
+	// Fallback to DNS name if no ClusterIP (shouldn't happen for ClusterIP services)
 	return fmt.Sprintf("%s.%s.svc.cluster.local", service.Name, service.Namespace), nil
 }
 

@@ -15,17 +15,30 @@ func TestGetHostFromService(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "cluster_ip_service",
+			name: "cluster_ip_service_ipv4",
 			service: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-service",
 					Namespace: "default",
 				},
 				Spec: v1.ServiceSpec{
-					ClusterIP: "1.1.1.1",
+					ClusterIP: "10.96.0.100",
 				},
 			},
-			want: "my-service.default.svc.cluster.local",
+			want: "10.96.0.100",
+		},
+		{
+			name: "cluster_ip_service_ipv6",
+			service: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-service",
+					Namespace: "default",
+				},
+				Spec: v1.ServiceSpec{
+					ClusterIP: "fd00:10:96::ae2c",
+				},
+			},
+			want: "[fd00:10:96::ae2c]",
 		},
 		{
 			name: "headless",
@@ -55,7 +68,7 @@ func TestGetHostFromService(t *testing.T) {
 			want: "example.default.svc.cluster.local",
 		},
 		{
-			name: "different_namespace",
+			name: "different_namespace_ipv4",
 			service: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "app-service",
@@ -65,7 +78,7 @@ func TestGetHostFromService(t *testing.T) {
 					ClusterIP: "10.0.0.1",
 				},
 			},
-			want: "app-service.production.svc.cluster.local",
+			want: "10.0.0.1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
