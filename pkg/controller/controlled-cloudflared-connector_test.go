@@ -21,10 +21,10 @@ func TestBuildCloudflaredCommand(t *testing.T) {
 			extraArgs: []string{},
 			expected: []string{
 				"cloudflared",
+				"tunnel",
 				"--protocol",
 				"auto",
 				"--no-autoupdate",
-				"tunnel",
 				"--metrics",
 				"0.0.0.0:44483",
 				"run",
@@ -39,10 +39,10 @@ func TestBuildCloudflaredCommand(t *testing.T) {
 			extraArgs: []string{"--post-quantum"},
 			expected: []string{
 				"cloudflared",
+				"tunnel",
 				"--protocol",
 				"quic",
 				"--no-autoupdate",
-				"tunnel",
 				"--post-quantum",
 				"--metrics",
 				"0.0.0.0:44483",
@@ -58,13 +58,13 @@ func TestBuildCloudflaredCommand(t *testing.T) {
 			extraArgs: []string{"--post-quantum", "--edge-ip-version", "4"},
 			expected: []string{
 				"cloudflared",
+				"--edge-ip-version",
+				"4",
+				"tunnel",
 				"--protocol",
 				"http2",
 				"--no-autoupdate",
-				"tunnel",
 				"--post-quantum",
-				"--edge-ip-version",
-				"4",
 				"--metrics",
 				"0.0.0.0:44483",
 				"run",
@@ -79,10 +79,10 @@ func TestBuildCloudflaredCommand(t *testing.T) {
 			extraArgs: nil,
 			expected: []string{
 				"cloudflared",
+				"tunnel",
 				"--protocol",
 				"auto",
 				"--no-autoupdate",
-				"tunnel",
 				"--metrics",
 				"0.0.0.0:44483",
 				"run",
@@ -94,10 +94,21 @@ func TestBuildCloudflaredCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CLOUDFLARED_TUNNEL_EDGE_IP_VERSION", "")
 			result := buildCloudflaredCommand(tt.protocol, tt.token, tt.extraArgs)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestBuildCloudflaredCommand_EdgeFromEnvStripsDuplicateExtra(t *testing.T) {
+	t.Setenv("CLOUDFLARED_TUNNEL_EDGE_IP_VERSION", "6")
+	result := buildCloudflaredCommand("auto", "tok", []string{"--edge-ip-version", "6", "--post-quantum"})
+	expected := []string{
+		"cloudflared", "--edge-ip-version", "6", "tunnel", "--protocol", "auto", "--no-autoupdate",
+		"--post-quantum", "--metrics", "0.0.0.0:44483", "run", "--token", "tok",
+	}
+	assert.Equal(t, expected, result)
 }
 
 func TestSlicesEqual(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 type rootCmdFlags struct {
@@ -76,7 +77,10 @@ func main() {
 				os.Exit(1)
 			}
 
-			mgr, err := manager.New(cfg, manager.Options{})
+			// BindAddress "0" disables the metrics listener (:8080 in older CR). hostNetwork + Velero share the node.
+			mgr, err := manager.New(cfg, manager.Options{
+				Metrics: metricsserver.Options{BindAddress: "0"},
+			})
 			if err != nil {
 				logger.Error(err, "unable to set up manager")
 				os.Exit(1)

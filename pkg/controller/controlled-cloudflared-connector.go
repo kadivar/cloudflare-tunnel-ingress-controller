@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -169,16 +170,28 @@ func splitNonEmpty(s, sep string) []string {
 	return out
 }
 
+// getConnectorTunnelEdgeEnv sets TUNNEL_EDGE_IP_VERSION on the connector when the controller receives
+// CLOUDFLARED_TUNNEL_EDGE_IP_VERSION from Helm (belt-and-suspenders with CLI --edge-ip-version for IPv6-only nodes).
+func getConnectorTunnelEdgeEnv() []v1.EnvVar {
+	v := strings.TrimSpace(os.Getenv("CLOUDFLARED_TUNNEL_EDGE_IP_VERSION"))
+	if v == "" {
+		return nil
+	}
+	return []v1.EnvVar{{Name: "TUNNEL_EDGE_IP_VERSION", Value: v}}
+}
+
 func buildConnectorPodSpec(image, pullPolicy, protocol, token string, extraArgs []string) v1.PodSpec {
+	container := v1.Container{
+		Name:            "controlled-cloudflared-connector",
+		Image:           image,
+		ImagePullPolicy: v1.PullPolicy(pullPolicy),
+		Command:         buildCloudflaredCommand(protocol, token, extraArgs),
+	}
+	if env := getConnectorTunnelEdgeEnv(); len(env) > 0 {
+		container.Env = env
+	}
 	spec := v1.PodSpec{
-		Containers: []v1.Container{
-			{
-				Name:            "controlled-cloudflared-connector",
-				Image:           image,
-				ImagePullPolicy: v1.PullPolicy(pullPolicy),
-				Command:         buildCloudflaredCommand(protocol, token, extraArgs),
-			},
-		},
+		Containers:    []v1.Container{container},
 		RestartPolicy: v1.RestartPolicyAlways,
 	}
 	hostNetwork, dnsPolicy, dnsConfig := getConnectorPodSpecFromEnv()
@@ -253,7 +266,40 @@ func connectorSpecNeedsUpdate(existing, desired *appsv1.Deployment) bool {
 	if !slicesEqual(exC.Command, desC.Command) {
 		return true
 	}
+	if !connectorContainerEnvEqual(exC.Env, desC.Env) {
+		return true
+	}
 	return false
+}
+
+func connectorContainerEnvEqual(a, b []v1.EnvVar) bool {
+	norm := func(e []v1.EnvVar) []v1.EnvVar {
+		var out []v1.EnvVar
+		for _, x := range e {
+			if x.ValueFrom != nil {
+				continue
+			}
+			out = append(out, x)
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Name != out[j].Name {
+				return out[i].Name < out[j].Name
+			}
+			return out[i].Value < out[j].Value
+		})
+		return out
+	}
+	na := norm(a)
+	nb := norm(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for i := range na {
+		if na[i].Name != nb[i].Name || na[i].Value != nb[i].Value {
+			return false
+		}
+	}
+	return true
 }
 
 func nodeSelectorEqual(a, b map[string]string) bool {
@@ -303,23 +349,70 @@ func getDesiredReplicas() (int32, error) {
 	return int32(replicas), nil
 }
 
+// stripEdgeIpVersionArgs removes --edge-ip-version / value pairs so we can emit it once as a global flag.
+func stripEdgeIpVersionArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--edge-ip-version" {
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--edge-ip-version=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// extractEdgeIpVersion removes the first --edge-ip-version occurrence from args and returns its value.
+func extractEdgeIpVersion(args []string) (ver string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--edge-ip-version" && i+1 < len(args) {
+			v := strings.TrimSpace(args[i+1])
+			rest = append(append([]string{}, args[:i]...), args[i+2:]...)
+			return v, rest
+		}
+		if strings.HasPrefix(args[i], "--edge-ip-version=") {
+			v := strings.TrimSpace(strings.TrimPrefix(args[i], "--edge-ip-version="))
+			rest = append(append([]string{}, args[:i]...), args[i+1:]...)
+			return v, rest
+		}
+	}
+	return "", args
+}
+
 func buildCloudflaredCommand(protocol string, token string, extraArgs []string) []string {
-	command := []string{
-		"cloudflared",
+	// --edge-ip-version is a root-level flag in cloudflared (see "cloudflared [global options]").
+	// After "tunnel" it is ignored and the edge stays IPv4 → "dial tcp 198.41.x.x:7844 ... unreachable" on IPv6-only nodes.
+	extra := append([]string(nil), extraArgs...)
+	edgeGlobal := strings.TrimSpace(os.Getenv("CLOUDFLARED_TUNNEL_EDGE_IP_VERSION"))
+	if edgeGlobal != "" {
+		extra = stripEdgeIpVersionArgs(extra)
+	} else {
+		edgeGlobal, extra = extractEdgeIpVersion(extra)
+	}
+	if edgeGlobal != "" {
+		extra = stripEdgeIpVersionArgs(extra)
+	}
+
+	command := []string{"cloudflared"}
+	if edgeGlobal != "" {
+		command = append(command, "--edge-ip-version", edgeGlobal)
+	}
+	command = append(command,
+		"tunnel",
 		"--protocol",
 		protocol,
 		"--no-autoupdate",
-		"tunnel",
+	)
+	if len(extra) > 0 {
+		command = append(command, extra...)
 	}
-	
-	// Add all extra arguments between "tunnel" and "run"
-	if len(extraArgs) > 0 {
-		command = append(command, extraArgs...)
-	}
-	
-	// Add metrics, run subcommand and token
 	command = append(command, "--metrics", "0.0.0.0:44483", "run", "--token", token)
-	
 	return command
 }
 

@@ -96,6 +96,8 @@ spec:
               value: {{ .Values.cloudflared.connectorPodSpec.nodeSelectorWorker | default false | quote }}
             - name: CLOUDFLARED_SPREAD_ONE_PER_NODE
               value: {{ .Values.cloudflared.connectorPodSpec.spreadOnePerNode | default false | quote }}
+            - name: CLOUDFLARED_TUNNEL_EDGE_IP_VERSION
+              value: {{ .Values.cloudflared.edgeIpVersion | default "" | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
